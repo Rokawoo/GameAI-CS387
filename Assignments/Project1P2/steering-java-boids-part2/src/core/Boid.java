@@ -12,22 +12,24 @@ public class Boid {
 	public static final Float MASS = 1f;
 	public static final double MAX_SPEED = 4;
 	public static final int MAX_ACCELERATION = 2;
-	// max magnitude of the steering force applied in one tick
+	// max steer force
 	public static final double MAX_FORCE = 1;
 	double distance = 10;
 
-	// how close the boid must get to a checkpoint before moving on to the next one
+	// close enough to checkpoint
 	private static final double ARRIVAL_RADIUS = 10;
-	// how far ahead the rays are cast
+	// ray len
 	private static final double LOOK_AHEAD = 80;
-	// distance between consecutive samples along a ray
+	// ticks w/ no progress = stuck
+	private static final int STUCK_TICKS = 150;
+	// ray march step
 	private static final double RAY_STEP = 2;
-	// extra clearance kept between the boid and the obstacles
+	// extra room around obstacles
 	private static final int SAFETY_MARGIN = 5;
-	// angle between two consecutive candidate rays when searching for a free direction
+	// angle between rays
 	private static final double RAY_ANGLE_STEP = Math.toRadians(10);
 	private static final int MAX_RAY_STEPS = (int) Math.round(Math.PI / RAY_ANGLE_STEP);
-	// below this fraction of free distance the boid slows down
+	// min speed % when its tight
 	private static final double MIN_SPEED_FACTOR = 0.15;
 
 	private Board board;
@@ -36,13 +38,23 @@ public class Boid {
 	private Vector2d steerForce;
 	private ArrayList<Vector2d> checkpoints;
 	private ArrayList<Line> rays;
+	// obstacles hit, for drawing
+	private ArrayList<Object> rayHits;
+	// ray it's actually following when going around something, null if clear
+	private Line avoidRay;
 	private Vector2d currentCheckpoint;
 	private int radius;
 	private int currentCheckpointIndex;
 	private double distanceToTarget;
 	private CollisonCircle collisionCircle;
-	// side the boid committed to while going around an obstacle: +1, -1, or 0 (none)
+	// side going around: +1/-1, 0 none
 	private int avoidSide;
+	// stuck check stuff
+	private double bestDistanceToTarget = Double.MAX_VALUE;
+	private int ticksWithoutProgress;
+	// forced side when escaping
+	private int escapeSide;
+	private int escapeTicks;
 
 	public Boid(Board b, Vector2d initialPosition, int Radius, ArrayList<Vector2d> checkpoints) {
 		board = b;
@@ -53,135 +65,157 @@ public class Boid {
 		distanceToTarget = 0d;
 		this.checkpoints = checkpoints;
 		currentCheckpoint = checkpoints.get(currentCheckpointIndex);
-		// the collision circle gets its own copy of the position, otherwise both
-		// update() and collisionCircle.move() would move the same vector each tick
+		// clone or update() moves it twice
 		collisionCircle = new CollisonCircle((Vector2d) centerPosition.clone(), Radius);
 		rays = new ArrayList<Line>();
+		rayHits = new ArrayList<Object>();
 		avoidSide = 0;
 	}
 
-	/**
-	 * Path following + obstacle avoidance.
-	 * The boid seeks the current checkpoint; once it reaches it, it moves on to the next
-	 * one (wrapping around after the last). Before moving, rays are cast to find a free
-	 * direction: first straight towards the checkpoint, and if that is blocked, rotating
-	 * away from it in steps until a clear ray is found. Once the boid picks a side to go
-	 * around an obstacle it sticks to it until the way to the checkpoint is clear again,
-	 * so it does not oscillate between the two sides.
-	 */
+	// path following + avoidance
+	// seek checkpoint, next one when reached
+	// blocked -> rotate 10deg til clear ray
+	// keep same side til clear (no wobble)
 	public void objectAvoidance() {
 		rays.clear();
+		rayHits.clear();
 
-		// path following: advance to the next checkpoint when the current one is reached
+		// 1. reached checkpoint -> next
+		if (distance(centerPosition, currentCheckpoint) < ARRIVAL_RADIUS) nextCheckpoint();
 		Vector2d toTarget = new Vector2d(currentCheckpoint);
 		toTarget.sub(centerPosition);
 		distanceToTarget = toTarget.length();
-		if (distanceToTarget < ARRIVAL_RADIUS) {
-			currentCheckpointIndex = (currentCheckpointIndex + 1) % checkpoints.size();
-			currentCheckpoint = checkpoints.get(currentCheckpointIndex);
-			toTarget = new Vector2d(currentCheckpoint);
-			toTarget.sub(centerPosition);
-			distanceToTarget = toTarget.length();
-		}
 
-		double targetAngle = Math.atan2(toTarget.getY(), toTarget.getX());
-		// no need to look past the checkpoint itself
+		// 2. stuck?
+		checkIfStuck();
+
+		// 3. find open dir, no need to look past checkpoint
 		double rayLength = Math.max(Math.min(LOOK_AHEAD, distanceToTarget), radius);
+		double targetAngle = Math.atan2(toTarget.getY(), toTarget.getX());
+		double moveAngle = findOpenDirection(targetAngle, rayLength);
 
-		double chosenAngle;
-		double chosenFree;
-		double free = castRay(targetAngle, rayLength);
-		if (free >= rayLength) {
-			// the way to the checkpoint is clear
+		// 4. room ahead + actual heading (cant turn instantly), less room = slower
+		double room = castRay(moveAngle, rayLength);
+		// not going straight at target = avoiding, save that ray to draw green
+		avoidRay = (moveAngle != targetAngle) ? rays.get(rays.size() - 1) : null;
+		if (velocity.length() > 0.1)
+			room = Math.min(room, castRay(Math.atan2(velocity.getY(), velocity.getX()), rayLength));
+		double speed = MAX_SPEED * Math.max(MIN_SPEED_FACTOR, Math.min(1, room / rayLength));
+
+		// 5. seek
+		seek(moveAngle, speed);
+	}
+
+	private void nextCheckpoint() {
+		currentCheckpointIndex = (currentCheckpointIndex + 1) % checkpoints.size();
+		currentCheckpoint = checkpoints.get(currentCheckpointIndex);
+		bestDistanceToTarget = Double.MAX_VALUE;
+		escapeTicks = 0;
+	}
+
+	// no progress for a while -> try other side
+	private void checkIfStuck() {
+		if (distanceToTarget < bestDistanceToTarget - 1) {
+			bestDistanceToTarget = distanceToTarget;
+			ticksWithoutProgress = 0;
+		} else if (++ticksWithoutProgress > STUCK_TICKS) {
+			escapeSide = (escapeTicks > 0 ? -escapeSide : (avoidSide != 0 ? -avoidSide : 1));
+			escapeTicks = 2 * STUCK_TICKS;
+			avoidSide = escapeSide;
+			bestDistanceToTarget = distanceToTarget;
+			ticksWithoutProgress = 0;
+		}
+		if (escapeTicks > 0) escapeTicks--;
+	}
+
+	// clear -> straight. else sweep our side then other til clear
+	// none clear -> most room
+	private double findOpenDirection(double targetAngle, double rayLength) {
+		double bestAngle = targetAngle;
+		double bestFree = castRay(targetAngle, rayLength);
+		if (bestFree >= rayLength) {
 			avoidSide = 0;
-			chosenAngle = targetAngle;
-			chosenFree = free;
-		} else {
-			if (avoidSide == 0) avoidSide = pickSide(targetAngle, rayLength);
+			return targetAngle;
+		}
 
-			// rotate away from the target on the committed side until a ray is clear
-			chosenAngle = targetAngle;
-			chosenFree = free;
-			boolean found = false;
-			for (int step = 1; step <= MAX_RAY_STEPS && !found; step++) {
-				double angle = targetAngle + avoidSide * step * RAY_ANGLE_STEP;
-				double f = castRay(angle, rayLength);
-				if (f >= rayLength) {
-					chosenAngle = angle;
-					chosenFree = f;
-					found = true;
-				} else if (f > chosenFree) {
-					// remember the most open direction in case nothing is fully clear
-					chosenAngle = angle;
-					chosenFree = f;
-				}
-			}
-			if (!found) {
-				// boxed in on this side: try the other side too
-				for (int step = 1; step < MAX_RAY_STEPS; step++) {
-					double angle = targetAngle - avoidSide * step * RAY_ANGLE_STEP;
-					double f = castRay(angle, rayLength);
-					if (f > chosenFree) {
-						chosenAngle = angle;
-						chosenFree = f;
-					}
+		if (avoidSide == 0) avoidSide = pickSide(targetAngle, rayLength);
+		for (int side : new int[] {avoidSide, -avoidSide}) {
+			for (int step = 1; step <= MAX_RAY_STEPS; step++) {
+				double angle = targetAngle + side * step * RAY_ANGLE_STEP;
+				double free = castRay(angle, rayLength);
+				if (free >= rayLength) return angle;
+				if (free > bestFree) {
+					bestAngle = angle;
+					bestFree = free;
 				}
 			}
 		}
+		return bestAngle;
+	}
 
-		// seek along the chosen direction, slowing down if there is little room ahead
-		double speed = MAX_SPEED * Math.max(MIN_SPEED_FACTOR, Math.min(1, chosenFree / rayLength));
-		Vector2d desiredVelocity = new Vector2d(Math.cos(chosenAngle), Math.sin(chosenAngle));
+	// pick side w/ open dir closest to target
+	// tie -> side we're heading
+	private int pickSide(double targetAngle, double rayLength) {
+		if (escapeTicks > 0) return escapeSide;
+		int headingSide = 1;
+		if (velocity.length() > 0.01) {
+			double heading = Math.atan2(velocity.getY(), velocity.getX());
+			if (Math.sin(heading - targetAngle) < 0) headingSide = -1;
+		}
+		for (int step = 1; step <= MAX_RAY_STEPS; step++) {
+			boolean leftClear = castRay(targetAngle + step * RAY_ANGLE_STEP, rayLength) >= rayLength;
+			boolean rightClear = castRay(targetAngle - step * RAY_ANGLE_STEP, rayLength) >= rayLength;
+			if (leftClear && rightClear) return headingSide;
+			if (leftClear) return 1;
+			if (rightClear) return -1;
+		}
+		return headingSide;
+	}
+
+	// seek: desired = dir * speed, steer = desired - vel
+	private void seek(double angle, double speed) {
+		Vector2d desiredVelocity = new Vector2d(Math.cos(angle), Math.sin(angle));
 		desiredVelocity.scale(speed);
 		steerForce = desiredVelocity;
 		steerForce.sub(velocity);
 	}
 
-	/**
-	 * Chooses which side (+1 or -1) to go around an obstacle: the side with the free
-	 * direction closest to the target, preferring the side the boid is already heading to.
-	 */
-	private int pickSide(double targetAngle, double rayLength) {
-		double headingBias = 0;
-		if (velocity.length() > 0.01) {
-			double heading = Math.atan2(velocity.getY(), velocity.getX());
-			headingBias = Math.signum(Math.sin(heading - targetAngle));
-		}
-		for (int step = 1; step <= MAX_RAY_STEPS; step++) {
-			boolean leftClear = castRay(targetAngle + step * RAY_ANGLE_STEP, rayLength) >= rayLength;
-			boolean rightClear = castRay(targetAngle - step * RAY_ANGLE_STEP, rayLength) >= rayLength;
-			if (leftClear && rightClear) return headingBias < 0 ? -1 : 1;
-			if (leftClear) return 1;
-			if (rightClear) return -1;
-		}
-		return headingBias < 0 ? -1 : 1;
-	}
-
-	/**
-	 * Raycast: moves a collision circle of the boid's size (plus a safety margin) along
-	 * the ray in small increments and checks it against every obstacle.
-	 * Returns the free distance along the ray (maxLength if nothing was hit).
-	 * The ray is also stored in "rays" so that it can be drawn.
-	 */
+	// raycast - slide circle (boid r + margin) along ray, check vs obstacles
+	// returns free dist (maxLength if no hit)
+	// only a hit if moving closer to it, else inside margin = all rays blocked
+	// saves ray + hit for drawing
 	private double castRay(double angle, double maxLength) {
 		ArrayList<Object> objects = board.getObjects();
-		double dx = Math.cos(angle);
-		double dy = Math.sin(angle);
+		Vector2d dir = new Vector2d(Math.cos(angle), Math.sin(angle));
+		Vector2d probePosition = new Vector2d();
+		CollisonCircle probe = new CollisonCircle(probePosition, getRayRadius());
+
 		double free = maxLength;
-		for (double d = RAY_STEP; d <= maxLength; d += RAY_STEP) {
-			Vector2d probePosition = new Vector2d(centerPosition.getX() + dx * d, centerPosition.getY() + dy * d);
-			CollisonCircle probe = new CollisonCircle(probePosition, radius + SAFETY_MARGIN);
-			boolean hit = false;
-			for (int i = 0; i < objects.size() && !hit; i++)
-				if (probe.collision(objects.get(i).getCollisonCircle())) hit = true;
-			if (hit) {
-				free = d - RAY_STEP;
-				break;
+		Object hitObject = null;
+		for (double d = RAY_STEP; d <= maxLength && hitObject == null; d += RAY_STEP) {
+			// center + dir * d
+			probePosition.scaleAdd(d, dir, centerPosition);
+			for (Object obstacle : objects) {
+				if (probe.collision(obstacle.getCollisonCircle())
+						&& distance(probePosition, obstacle.getCenterPosition()) < distance(centerPosition, obstacle.getCenterPosition())) {
+					hitObject = obstacle;
+					free = d - RAY_STEP;
+					break;
+				}
 			}
 		}
-		rays.add(new Line(centerPosition.getX(), centerPosition.getY(),
-				centerPosition.getX() + dx * free, centerPosition.getY() + dy * free));
+
+		Vector2d rayEnd = new Vector2d();
+		rayEnd.scaleAdd(free, dir, centerPosition);
+		rays.add(new Line(centerPosition.getX(), centerPosition.getY(), rayEnd.getX(), rayEnd.getY()));
+		if (hitObject != null && !rayHits.contains(hitObject)) rayHits.add(hitObject);
 		return free;
+	}
+
+	private static double distance(Vector2d a, Vector2d b) {
+		Vector2d difference = new Vector2d(a);
+		difference.sub(b);
+		return difference.length();
 	}
 
 	public void update() {
@@ -195,16 +229,15 @@ public class Boid {
 				return;
 
 		objectAvoidance();
-		// acceleration = force / mass
-		// (the force is truncated rather than normalized, so that small corrections
-		//  stay small and the boid does not jitter around its desired direction)
-		Vector2d acceleration = new Vector2d();
-		if (steerForce.length()>MAX_FORCE) {
+
+		// cap force not normalize, no jitter
+		if (steerForce.length() > MAX_FORCE) {
 			steerForce.normalize();
 			steerForce.scale(MAX_FORCE);
 		}
-		acceleration.setX(steerForce.getX() / MASS);
-		acceleration.setY(steerForce.getY() / MASS);
+		// acceleration = force / mass
+		Vector2d acceleration = new Vector2d(steerForce);
+		acceleration.scale(1 / MASS);
 
 		centerPosition.add(velocity);
 		// update the collision circle:
@@ -241,8 +274,21 @@ public class Boid {
 		return radius;
 	}
 
+	// ray circle r (boid + margin)
+	public int getRayRadius() {
+		return radius + SAFETY_MARGIN;
+	}
+
 	public ArrayList<Line> getRays() {
 		return rays;
+	}
+
+	public Line getAvoidRay() {
+		return avoidRay;
+	}
+
+	public ArrayList<Object> getRayHits() {
+		return rayHits;
 	}
 
 	public CollisonCircle getCollisionCircle() {

@@ -44,6 +44,7 @@ public class Board extends JPanel implements ActionListener{
 		graphics2d = (Graphics2D) g;
 		drawRays();
 		drawCircles();
+		drawRayHits();
 		drawInfoRect();
 		drawCheckPointNumbers();
 		Toolkit.getDefaultToolkit().sync();
@@ -61,7 +62,7 @@ public class Board extends JPanel implements ActionListener{
 
 	private void drawCheckPointNumbers() {
 		for (int checkpointIndex = 0; checkpointIndex < checkpoints.size(); checkpointIndex++) {
-			// the checkpoint the boid is currently heading to is drawn in green
+			// target = green
 			graphics2d.setColor(checkpointIndex == boid.getCurrentCheckpointIndex() ? Color.GREEN.darker() : Color.BLACK);
 			graphics2d.fillOval((int) checkpoints.get(checkpointIndex).getX() - 3, (int) checkpoints.get(checkpointIndex).getY() - 3, 6, 6);
 			graphics2d.drawString(
@@ -75,6 +76,25 @@ public class Board extends JPanel implements ActionListener{
 		graphics2d.setColor(Color.LIGHT_GRAY);
 		for (Line ray : boid.getRays())
 			ray.draw(graphics2d);
+		// blue line to target
+		Vector2d target = checkpoints.get(boid.getCurrentCheckpointIndex());
+		graphics2d.setColor(Color.BLUE);
+		graphics2d.drawLine(boid.getX(), boid.getY(), (int) target.getX(), (int) target.getY());
+		// path its taking around an obstacle = green
+		if (boid.getAvoidRay() != null) {
+			graphics2d.setColor(Color.GREEN.darker());
+			boid.getAvoidRay().draw(graphics2d);
+		}
+	}
+
+	// red outline = obstacle r + ray circle r
+	// what the ray line actually hits
+	private void drawRayHits() {
+		graphics2d.setColor(Color.RED);
+		for (Object hit : boid.getRayHits()) {
+			int r = hit.getRadius() + boid.getRayRadius();
+			graphics2d.drawOval(hit.getX() - r, hit.getY() - r, r * 2, r * 2);
+		}
 	}
 
 	private void drawCircles() {
