@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "S3: Human vs AI",
+            "request": "launch",
+            "mainClass": "s3.base.Main",
+            "projectName": "S3-CS387",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "java",
+            "name": "S3: AI vs AI",
+            "request": "launch",
+            "mainClass": "s3.base.Main",
+            "projectName": "S3-CS387",
+            "cwd": "${workspaceFolder}",
+            "args": ["-p", "1|player1|ai-archers-rush", "-p", "1|player2|ai-footmen-rush"]
+        }
+    ]
+}
