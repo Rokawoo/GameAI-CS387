@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  mario behavior tree for agents.firstLast
+  read at runtime by bt/BTLoader, change this file to change the agent, no recompiling
+  composites: sequence selector parallel utilityselector
+  decorators: inverter succeeder untilfail repeat cooldown
+  leaves:     <condition>Name</condition>  <action>Name</action>, attributes are knobs
+-->
+<behaviortree name="firstLastMario">
+  <parallel name="root">
+
+    <!-- movement brain, one branch wins each tick, top = most important -->
+    <selector name="brain">
+
+      <!-- 1. clock is low, go touch the flag no matter what -->
+      <sequence name="finishRun">
+        <condition speed="8.5" margin="42">MustFinish</condition>
+        <action>SetFinishTarget</action>
+        <action force="true">PlanMove</action>
+      </sequence>
+
+      <!-- 2. an enemy is right on top of us, stomp it or back off -->
+      <sequence name="survive">
+        <condition range="40">InDanger</condition>
+        <action>SetEvadeGoal</action>
+        <action>PlanMove</action>
+      </sequence>
+
+      <!-- 3. a mushroom or flower is out, grab it before it rolls off -->
+      <sequence name="powerUp">
+        <condition>PowerupVisible</condition>
+        <action>SetPowerupTarget</action>
+        <action>PlanMove</action>
+      </sequence>
+
+      <!-- 4. standing at a good respawn spot, farm it while the clock allows -->
+      <sequence name="farmHere">
+        <condition radius="48">FarmAvailable</condition>
+        <condition minRate="0.025" coinCost="8" tileCost="0.8">FarmPaysOff</condition>
+        <action trips="4" wait="120">SetFarmTarget</action>
+        <action>PlanMove</action>
+      </sequence>
+
+      <!-- 5. decision theory part: pick the best opportunity by utility -->
+      <utilityselector name="opportunities" stickiness="1.25">
+        <sequence name="stomp" utility="stompValue">
+          <condition>EnemyTargetAvailable</condition>
+          <action>SetEnemyTarget</action>
+          <action stuck="45" patience="60">PlanMove</action>
+        </sequence>
+        <sequence name="coins" utility="coinValue">
+          <condition>CoinVisible</condition>
+          <action>SetCoinTarget</action>
+          <action stuck="45" patience="150">PlanMove</action>
+        </sequence>
+        <cooldown name="blocks" ticks="30" utility="blockValue">
+          <sequence>
+            <condition>BlockToBump</condition>
+            <action>SetBlockTarget</action>
+            <action stuck="45" patience="90">PlanMove</action>
+          </sequence>
+        </cooldown>
+      </utilityselector>
+
+      <!-- 6. nothing near, walk back to a good farm spot if there is time -->
+      <sequence name="farmBack">
+        <condition radius="480">FarmAvailable</condition>
+        <condition minRate="0.025" coinCost="8" tileCost="0.8">FarmPaysOff</condition>
+        <action trips="4" wait="120">SetFarmTarget</action>
+        <action>PlanMove</action>
+      </sequence>
+
+      <!-- 7. big mario with nothing better to do smashes bricks -->
+      <cooldown name="smash" ticks="60">
+        <sequence>
+          <condition pick="smash">BlockToBump</condition>
+          <action pick="smash">SetBlockTarget</action>
+          <action stuck="30">PlanMove</action>
+        </sequence>
+      </cooldown>
+
+      <!-- 8. nothing to grab, move right but park before the flag -->
+      <sequence name="advance">
+        <action ahead="200" park="40">SetAdvanceTarget</action>
+        <action>PlanMove</action>
+      </sequence>
+
+      <!-- 9. last resort, just stay alive -->
+      <action>SafeFallback</action>
+    </selector>
+
+    <!-- fire mario shoots on the side, succeeder so it never breaks movement -->
+    <succeeder name="fireSide">
+      <sequence name="shoot">
+        <condition>IsFire</condition>
+        <condition range="112">EnemyInFireLine</condition>
+        <action>ShootFireball</action>
+      </sequence>
+    </succeeder>
+
+  </parallel>
+</behaviortree>
